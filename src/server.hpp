@@ -5,6 +5,12 @@
 #include <vector>
 #include <cstring>
 #include <cassert>
+#include "log.hpp"
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #define BUFFER_DEFAULT_SIZE 1024
 class Buffer
@@ -160,4 +166,158 @@ public:
     }
     // 清空缓冲区
     void Clear() { _reader_idx = _writer_idx = 0; }
+};
+
+class Socket
+{
+#define MAX_LISTEN 1024
+
+private:
+    int _sockfd; // 套接字描述符
+
+public:
+    Socket() : _sockfd(-1) {}
+    Socket(int fd) : _sockfd(fd) {}
+    ~Socket() { Close(); }
+    int Fd() { return _sockfd; }
+    bool Create()
+    {
+        _sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (_sockfd < 0)
+        {
+            ERR_LOG("Create Socket Failed!");
+            return false;
+        }
+        return true;
+    }
+    bool Bind(const std::string &ip, uint16_t port)
+    {
+        struct sockaddr_in local;
+        local.sin_family = AF_INET;
+        local.sin_addr.s_addr = inet_addr(ip.c_str());
+        local.sin_port = htons(port);
+        int n = bind(_sockfd, (struct sockaddr *)&local, sizeof(local));
+        if (n < 0)
+        {
+            ERR_LOG("Bind Failed!");
+            return false;
+        }
+        return true;
+    }
+    bool Listen(int backlog = MAX_LISTEN)
+    {
+        int n = listen(_sockfd, backlog);
+        if (n < 0)
+        {
+            ERR_LOG("Server Listen Falied!");
+            return false;
+        }
+        return true;
+    }
+    // 连接服务器
+    bool Connect(const std::string &ip, uint16_t port)
+    {
+        struct sockaddr_in server;
+        server.sin_family = AF_INET;
+        server.sin_addr.s_addr = inet_addr(ip.c_str());
+        server.sin_port = htons(port);
+        int n = connect(_sockfd, (struct sockaddr *)&server, sizeof(server));
+        if (n < 0)
+        {
+            ERR_LOG("Connect Server Failed!");
+            return false;
+        }
+        return true;
+    }
+    int Accept()
+    {
+        struct sockaddr_in peer;
+        socklen_t len = sizeof(peer);
+        int sock = accept(_sockfd, (struct sockaddr *)&peer, &len);
+        if (sock < 0)
+        {
+            ERR_LOG("Accept Falied");
+            return -1;
+        }
+        return sock;
+    }
+    ssize_t Recv(void *buf, size_t len, int flag = 0)
+    {
+        ssize_t s = recv(_sockfd, buf, len, flag);
+        if (s <= 0)
+        {
+            // EAGAIN: 当前socket接收缓冲区没有数据，非阻塞才会出现此错误
+            // EINTR: 信号中断
+            if (errno == EAGAIN || errno == EINTR)
+            {
+                return 0; // 没接收到数据
+            }
+
+            ERR_LOG("Socket Recv Failed!");
+            return -1;
+        }
+        return s;
+    }
+    void NonBlockRecv(void *buf, size_t len)
+    {
+        Recv(buf, len, MSG_DONTWAIT); // MSG_DONTWAIT当前接收是非阻塞
+    }
+    ssize_t Send(const void *buf, size_t len, int flag = 0)
+    {
+        ssize_t s = send(_sockfd, buf, len, flag);
+        if (s < 0)
+        {
+            ERR_LOG("Socket Send Failed!");
+            return -1;
+        }
+        return s;
+    }
+    void NonBlockSend(void *buf, size_t len)
+    {
+        Send(buf, len, MSG_DONTWAIT); // MSG_DONTWAIT当前发送是非阻塞
+    }
+    void Close()
+    {
+        if (_sockfd != -1)
+        {
+            close(_sockfd);
+            _sockfd = -1;
+        }
+    }
+    bool CreateServer(uint16_t port, const std::string &ip = "0.0.0.0", bool block_flag = false)
+    {
+        // 1.创建套接字，设置非阻塞  2.绑定ip+port 3.设为监听状态 4.ip+port重用
+        if (!Create())
+            return false;
+        if (block_flag) // 默认是阻塞
+            NonBlock();
+        if (!Bind(ip, port))
+            return false;
+        if (!Listen())
+            return false;
+        ReuseAddress();
+        return true;
+    }
+    bool CreateClient(uint16_t port, const std::string &ip)
+    {
+        // 1.创建套接字 2.连接
+        if (!Create())
+            return false;
+        if (!Connect(ip, port))
+            return false;
+
+        return true;
+    }
+    void ReuseAddress()
+    {
+        int val = 1;
+        // SO_REUSEADDR：允许重用本地地址。允许新套接字绑定到相同的本地地址，即使有连接处于 TIME_WAIT 状态。
+        // SO_REUSEPORT：允许多个套接字绑定到相同的地址和端口
+        setsockopt(_sockfd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, (void *)&val, sizeof(int));
+    }
+    void NonBlock()
+    {
+        int flag = fcntl(_sockfd, F_GETFL);
+        fcntl(_sockfd, F_SETFD, flag | O_NONBLOCK);
+    }
 };
